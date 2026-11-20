@@ -1,0 +1,6 @@
+{
+  "name": "Engineering BOM Verification System",
+  "description": "Browser-based client-side BOM verification tool comparing Original Navigation BOM and Microsoft Dynamics 365 Business Central BOM Excel workbooks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
