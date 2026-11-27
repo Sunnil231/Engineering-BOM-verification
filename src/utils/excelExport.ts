@@ -1,313 +1,231 @@
 import * as XLSX from 'xlsx';
-import type { BomVerificationReport, ExcelContainerFormat } from '../types/bom';
+import type {
+  BomVerificationRecord,
+  BomVerificationReport,
+  ExcelContainerFormat,
+} from '../types/bom';
+import { buildVerificationObservations } from './bomObservations';
+
+function formatDiffCell(diff: number | null): string | number {
+  if (diff === null || !Number.isFinite(diff)) return '';
+  return diff > 0 ? `+${diff}` : diff;
+}
+
+function buildIncorrectSheetRows(report: BomVerificationReport): Record<string, unknown>[] {
+  const combinedIncorrect: BomVerificationRecord[] = [
+    ...report.incorrectRecords,
+    ...report.descriptionReviewRecords,
+  ];
+
+  if (combinedIncorrect.length === 0) {
+    return [{ Status: 'CORRECT — No incorrect field or hierarchy discrepancies found.' }];
+  }
+
+  const rows: Record<string, unknown>[] = [];
+  let sr = 1;
+
+  for (const r of combinedIncorrect) {
+    const levelDisplay =
+      r.originalLevel === r.bcLevel
+        ? r.originalLevel
+        : `Std: ${r.originalLevel} / Upl: ${r.bcLevel}`;
+    const parentAssembly =
+      r.originalParentAssembly === r.bcParentAssembly
+        ? r.originalParentAssembly
+        : `Std: ${r.originalParentAssembly} | Upl: ${r.bcParentAssembly}`;
+    const stdPath = r.originalNode?.hierarchyPath || r.hierarchyPath || '—';
+    const uplPath = r.bcNode?.hierarchyPath || r.hierarchyPath || '—';
+
+    if (r.changes.length === 0) {
+      rows.push({
+        'Sr.': sr++,
+        Status: 'INCORRECT',
+        Level: levelDisplay,
+        'Parent Assembly': parentAssembly,
+        'Standard Hierarchy Path': stdPath,
+        'Uploaded Hierarchy Path': uplPath,
+        'Part No.': r.itemCode,
+        Description: r.description || r.originalDescription || '—',
+        Field: 'General',
+        'Standard Value': r.originalValueSummary || '—',
+        'Uploaded Value': r.bcValueSummary || '—',
+        'Numeric Diff': '',
+        'Standard Row': r.originalRowNumber ?? '',
+        'Uploaded Row': r.bcRowNumber ?? '',
+        Issue: r.reasonForClassification,
+      });
+    } else {
+      for (const change of r.changes) {
+        rows.push({
+          'Sr.': sr++,
+          Status: 'INCORRECT',
+          Level: levelDisplay,
+          'Parent Assembly': parentAssembly,
+          'Standard Hierarchy Path': stdPath,
+          'Uploaded Hierarchy Path': uplPath,
+          'Part No.': r.itemCode,
+          Description:
+            change.field === 'Description'
+              ? `Std: ${r.originalDescription || '—'} | Upl: ${r.bcDescription || '—'}`
+              : r.description || r.originalDescription || '—',
+          Field: change.field,
+          'Standard Value': change.before || '—',
+          'Uploaded Value': change.after || '—',
+          'Numeric Diff':
+            change.numericDiff !== undefined ? formatDiffCell(change.numericDiff) : '',
+          'Standard Row': r.originalRowNumber ?? '',
+          'Uploaded Row': r.bcRowNumber ?? '',
+          Issue: change.explanation,
+        });
+      }
+    }
+  }
+
+  return rows;
+}
+
+function buildMissingSheetRows(report: BomVerificationReport): Record<string, unknown>[] {
+  if (report.missingRecords.length === 0) {
+    return [{ Status: 'CORRECT — No missing items found.' }];
+  }
+
+  return report.missingRecords.map((r, idx) => ({
+    'Sr.': idx + 1,
+    Status: 'MISSING',
+    Level: r.originalLevel,
+    'Parent Assembly': r.originalParentAssembly,
+    'Hierarchical Path': r.originalNode?.hierarchyPath || r.hierarchyPath,
+    'Part No.': r.itemCode,
+    Description: r.originalDescription || '—',
+    'Item Type': r.itemType || '—',
+    UOM: r.uom || '—',
+    'Standard BOM Qty.': r.originalBomQty ?? '',
+    'Standard Total BOM Qty': r.originalTotalQty ?? '',
+    'Standard Value': r.originalValueSummary,
+    'Uploaded Value': 'MISSING',
+    'Standard Row': r.originalRowNumber ?? '',
+    Issue: r.reasonForClassification,
+  }));
+}
+
+function buildAdditionalSheetRows(report: BomVerificationReport): Record<string, unknown>[] {
+  if (report.additionalRecords.length === 0) {
+    return [{ Status: 'CORRECT — No additional items found.' }];
+  }
+
+  return report.additionalRecords.map((r, idx) => ({
+    'Sr.': idx + 1,
+    Status: 'ADDITIONAL',
+    Level: r.bcLevel,
+    'Parent Assembly': r.bcParentAssembly,
+    'Hierarchical Path': r.bcNode?.hierarchyPath || r.hierarchyPath,
+    'Part No.': r.itemCode,
+    Description: r.bcDescription || '—',
+    'Item Type': r.itemType || '—',
+    UOM: r.uom || '—',
+    'Uploaded BOM Qty.': r.bcBomQty ?? '',
+    'Uploaded Total BOM Qty': r.bcTotalQty ?? '',
+    'Standard Value': '—',
+    'Uploaded Value': r.bcValueSummary,
+    'Uploaded Row': r.bcRowNumber ?? '',
+    Issue: r.reasonForClassification,
+  }));
+}
+
+function buildUnresolvedSheetRows(report: BomVerificationReport): Record<string, unknown>[] {
+  const combinedUnresolved: BomVerificationRecord[] = [
+    ...report.missingItemCodeRecords,
+    ...report.manualReviewRecords,
+  ];
+
+  if (combinedUnresolved.length === 0) {
+    return [{ Status: 'CORRECT — No unresolved items requiring manual investigation.' }];
+  }
+
+  return combinedUnresolved.map((r, idx) => {
+    const levelDisplay =
+      r.originalLevel !== '—' && r.originalLevel !== '' ? r.originalLevel : r.bcLevel || '—';
+    const parentAssembly =
+      r.originalParentAssembly !== '—' && r.originalParentAssembly !== ''
+        ? r.originalParentAssembly
+        : r.bcParentAssembly || '—';
+
+    return {
+      'Sr.': idx + 1,
+      Status: 'UNRESOLVED',
+      'Source BOM': r.sourceSide ?? 'Both',
+      Level: levelDisplay,
+      'Parent Assembly': parentAssembly,
+      'Hierarchical Path': r.hierarchyPath || '—',
+      'Part No.': r.itemCode || '(Blank)',
+      Description: r.description || r.originalDescription || r.bcDescription || '—',
+      'Item Type': r.itemType || '—',
+      UOM: r.uom || '—',
+      'Standard Value': r.originalValueSummary || '—',
+      'Uploaded Value': r.bcValueSummary || '—',
+      'Standard Row': r.originalRowNumber ?? '',
+      'Uploaded Row': r.bcRowNumber ?? '',
+      Issue: r.reasonForClassification,
+    };
+  });
+}
 
 export function buildExcelErrorReportBinary(
   report: BomVerificationReport,
-  originalFileName: string,
-  bcFileName: string,
+  _originalFileName: string,
+  _bcFileName: string,
   format: ExcelContainerFormat
 ): Uint8Array {
-  const { summary } = report;
+  if (report.audit.validationStatus !== 'APPROVED') {
+    throw new Error(
+      'VALIDATION INCOMPLETE – REPORT NOT APPROVED: Excel discrepancy report generation is blocked until all three verification stages and count reconciliation pass.'
+    );
+  }
+
   const wb = XLSX.utils.book_new();
 
-  const origReconciledTotal =
-    summary.matchedCount +
-    summary.matchedWithFieldErrorsTotal +
-    summary.missingCount +
-    summary.missingItemCodeOriginalCount;
-  const bcReconciledTotal =
-    summary.matchedCount +
-    summary.matchedWithFieldErrorsTotal +
-    summary.additionalCount +
-    summary.missingItemCodeBcCount;
-
-  // Sheet 1: Summary
-  const summaryRows = [
-    {
-      Section: 'Report Info',
-      Parameter: 'Verification System',
-      Value: 'Engineering BOM Verification System (NAV to Business Central)',
-    },
-    { Section: 'Report Info', Parameter: 'Original Navigation BOM Filename', Value: originalFileName },
-    { Section: 'Report Info', Parameter: 'Business Central BOM Filename', Value: bcFileName },
-    { Section: 'Report Info', Parameter: 'Verification Date & Time', Value: summary.verifiedAt },
-    {
-      Section: 'Report Info',
-      Parameter: 'Overall Status',
-      Value:
-        summary.overallStatus === 'PASS'
-          ? 'PASS – No discrepancies found.'
-          : 'FAIL – Discrepancies found.',
-    },
-    { Section: 'Occurrence Totals', Parameter: 'Original BOM Component Count', Value: summary.originalCount },
-    { Section: 'Occurrence Totals', Parameter: 'Business Central BOM Component Count', Value: summary.bcCount },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: 'Correctly Matched Records',
-      Value: summary.matchedCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: 'Matched Records with Field Errors (Total)',
-      Value: summary.matchedWithFieldErrorsTotal,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Field & Hierarchy Errors',
-      Value: summary.recordsWithErrorsCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Description Differences – Review Required',
-      Value: summary.descriptionReviewCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: 'Missing Components',
-      Value: summary.missingCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Missing Parent Assemblies',
-      Value: summary.missingParentCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Missing Child Components',
-      Value: summary.missingChildCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: 'Additional Components',
-      Value: summary.additionalCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Additional Parent Assemblies',
-      Value: summary.additionalParentCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Additional Child Components',
-      Value: summary.additionalChildCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: 'Missing Item Code Records (Unmatched Blank No.)',
-      Value: summary.missingItemCodeCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Original Navigation Missing Item Code',
-      Value: summary.missingItemCodeOriginalCount,
-    },
-    {
-      Section: 'Verification Breakdown',
-      Parameter: '  - Business Central Missing Item Code',
-      Value: summary.missingItemCodeBcCount,
-    },
-    {
-      Section: 'Reconciliation Check',
-      Parameter:
-        'Original Occurrence Reconciliation (Matched + Matched w/ Errors + Missing + Orig Missing Item Code)',
-      Value: `${origReconciledTotal} / ${summary.originalCount}`,
-    },
-    {
-      Section: 'Reconciliation Check',
-      Parameter:
-        'Business Central Occurrence Reconciliation (Matched + Matched w/ Errors + Additional + BC Missing Item Code)',
-      Value: `${bcReconciledTotal} / ${summary.bcCount}`,
-    },
-    { Section: 'Field Error Breakdown', Parameter: 'Incorrect Level', Value: summary.incorrectLevelCount },
-    {
-      Section: 'Field Error Breakdown',
-      Parameter: 'Incorrect Item Code / Parent-Child Relationship',
-      Value: summary.incorrectHierarchyCount,
-    },
-    {
-      Section: 'Field Error Breakdown',
-      Parameter: 'Incorrect Description (Review Required + Combined)',
-      Value: summary.incorrectDescriptionCount,
-    },
-    {
-      Section: 'Field Error Breakdown',
-      Parameter: 'Incorrect Item Type (Total)',
-      Value: summary.incorrectItemTypeCount,
-    },
-    {
-      Section: 'Field Error Breakdown',
-      Parameter: '  - Purchase vs Prod. Order Mismatches',
-      Value: summary.purchaseVsProdOrderCount,
-    },
-    { Section: 'Field Error Breakdown', Parameter: 'Incorrect UOM', Value: summary.incorrectUomCount },
-    { Section: 'Field Error Breakdown', Parameter: 'Incorrect BOM Qty.', Value: summary.incorrectBomQtyCount },
-    {
-      Section: 'Field Error Breakdown',
-      Parameter: 'Incorrect Total BOM Qty',
-      Value: summary.incorrectTotalBomQtyCount,
-    },
-    {
-      Section: 'Supplementary Warnings',
-      Parameter: 'Structural Warnings Count (Reconciles with Structural Warnings sheet)',
-      Value: summary.supplementaryWarningCount,
-    },
-  ];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), 'Summary');
-
-  // Sheet 2: Missing Components
-  const missingRows =
-    report.missingRecords.length > 0
-      ? report.missingRecords.map((r) => ({
-          'Error Category': r.errorCategory,
-          'Component Role': r.componentRole,
-          'BOM Level': r.rawLevel || r.level,
-          'Parent Assembly Code': r.parentAssemblyCode,
-          'Parent Hierarchy Path': r.parentPath,
-          'Item Code (No.)': r.itemCode,
-          Description: r.description,
-          'Item Type': r.itemType,
-          UOM: r.uom,
-          'Original BOM Qty.': r.originalBomQty ?? '',
-          'Original Total BOM Qty': r.originalTotalQty ?? '',
-          'Original Row': r.originalNode?.rowNumber ?? '',
-          'Detailed Explanation': r.detailedExplanation,
-        }))
-      : [{ Status: 'No missing components found.' }];
+  // Exact 4 Discrepancy Worksheets Only
   XLSX.utils.book_append_sheet(
     wb,
-    XLSX.utils.json_to_sheet(missingRows),
-    'Missing Components'
+    XLSX.utils.json_to_sheet(buildIncorrectSheetRows(report)),
+    'Incorrect Items'
   );
-
-  // Sheet 3: Additional Components
-  const additionalRows =
-    report.additionalRecords.length > 0
-      ? report.additionalRecords.map((r) => ({
-          'Error Category': r.errorCategory,
-          'Component Role': r.componentRole,
-          'BOM Level': r.rawLevel || r.level,
-          'Parent Assembly Code': r.parentAssemblyCode,
-          'Parent Hierarchy Path': r.parentPath,
-          'Item Code (No.)': r.itemCode,
-          Description: r.description,
-          'Item Type': r.itemType,
-          UOM: r.uom,
-          'BC BOM Qty.': r.bcBomQty ?? '',
-          'BC Total BOM Qty': r.bcTotalQty ?? '',
-          'BC Row': r.bcNode?.rowNumber ?? '',
-          'Detailed Explanation': r.detailedExplanation,
-        }))
-      : [{ Status: 'No additional components found.' }];
   XLSX.utils.book_append_sheet(
     wb,
-    XLSX.utils.json_to_sheet(additionalRows),
-    'Additional Components'
+    XLSX.utils.json_to_sheet(buildMissingSheetRows(report)),
+    'Missing Items'
+  );
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(buildAdditionalSheetRows(report)),
+    'Additional Items'
+  );
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(buildUnresolvedSheetRows(report)),
+    'Unresolved Items'
   );
 
-  // Sheet 4: Incorrect Entries (includes Field/Hierarchy Errors, Description Differences – Review Required, and Missing Item Code)
-  const combinedIncorrect = [
-    ...report.incorrectRecords,
-    ...report.descriptionReviewRecords,
-    ...report.missingItemCodeRecords,
+  const observations = buildVerificationObservations(report);
+  const observationRows: Record<string, unknown>[] = [
+    ...observations.map((obs) => ({
+      Section: 'Category Observation',
+      Category: obs.category,
+      Count: obs.countLabel,
+      Observation: obs.observation,
+    })),
+    ...report.issues.map((issue) => ({
+      Section: 'Other – Structural Warning',
+      Category: issue.warningCategory,
+      Count: `${issue.source} Row ${issue.rowNumber}`,
+      Observation: `[${issue.itemCode} | Parent: ${issue.parentAssembly} | Level ${issue.level}] ${issue.message}`,
+    })),
   ];
 
-  const incorrectRows =
-    combinedIncorrect.length > 0
-      ? combinedIncorrect.map((r) => ({
-          Classification:
-            r.status === 'description_review'
-              ? 'Description Differences – Review Required'
-              : r.status === 'missing_item_code'
-                ? 'Missing Item Code'
-                : 'Field / Hierarchy Error',
-          'Error Category': r.errorCategory,
-          'Source Report': r.sourceSide ?? 'Both',
-          'Original Row': r.originalNode?.rowNumber ?? '',
-          'BC Row': r.bcNode?.rowNumber ?? '',
-          'BOM Level (Orig / BC)':
-            r.status === 'missing_item_code'
-              ? r.rawLevel || String(r.level)
-              : `${r.originalNode?.rawLevel ?? ''} / ${r.bcNode?.rawLevel ?? ''}`,
-          'Parent Assembly Code': r.parentAssemblyCode,
-          'Original Parent Path': r.originalNode?.parentPath ?? '',
-          'BC Parent Path': r.bcNode?.parentPath ?? '',
-          'Item Code (No.)': r.itemCode,
-          'Original Description': r.originalDescription,
-          'BC Description': r.bcDescription,
-          'Original Item Type': r.originalNode?.itemType ?? '',
-          'BC Item Type': r.bcNode?.itemType ?? '',
-          'Original UOM': r.originalNode?.uom ?? '',
-          'BC UOM': r.bcNode?.uom ?? '',
-          'Original BOM Qty.': r.originalBomQty ?? '',
-          'BC BOM Qty.': r.bcBomQty ?? '',
-          'Original Total BOM Qty': r.originalTotalQty ?? '',
-          'BC Total BOM Qty': r.bcTotalQty ?? '',
-          'Original Value':
-            r.status === 'missing_item_code'
-              ? r.sourceSide === 'Original Navigation'
-                ? '(Blank Item Code)'
-                : '—'
-              : r.changes.map((c) => `${c.field}: ${c.before}`).join(' | '),
-          'Business Central Value':
-            r.status === 'missing_item_code'
-              ? r.sourceSide === 'Business Central'
-                ? '(Blank Item Code)'
-                : '—'
-              : r.changes.map((c) => `${c.field}: ${c.after}`).join(' | '),
-          'Detailed Explanation': r.detailedExplanation,
-        }))
-      : [{ Status: 'No incorrect entries, description review items, or missing item codes found.' }];
   XLSX.utils.book_append_sheet(
     wb,
-    XLSX.utils.json_to_sheet(incorrectRows),
-    'Incorrect Entries'
-  );
-
-  // Sheet 5: Correctly Matched Records
-  const matchedRows =
-    report.matchedRecords.length > 0
-      ? report.matchedRecords.map((r) => ({
-          Status: 'MATCHED',
-          'Component Role': r.componentRole,
-          'BOM Level': r.rawLevel || r.level,
-          'Parent Assembly Code': r.parentAssemblyCode,
-          'Parent Hierarchy Path': r.parentPath,
-          'Item Code (No.)': r.itemCode,
-          Description: r.description,
-          'Item Type': r.itemType,
-          UOM: r.uom,
-          'BOM Qty.': r.bcBomQty ?? r.originalBomQty ?? '',
-          'Total BOM Qty': r.bcTotalQty ?? r.originalTotalQty ?? '',
-          'Original Row': r.originalNode?.rowNumber ?? '',
-          'BC Row': r.bcNode?.rowNumber ?? '',
-        }))
-      : [{ Status: 'No matched records.' }];
-  XLSX.utils.book_append_sheet(
-    wb,
-    XLSX.utils.json_to_sheet(matchedRows),
-    'Correctly Matched Records'
-  );
-
-  // Sheet 6: Structural Warnings (reconciles 1:1 with Summary warning count)
-  const warningRows =
-    report.issues.length > 0
-      ? report.issues.map((issue) => ({
-          'Warning Category': issue.warningCategory,
-          'Warning Code': issue.code,
-          'Source Report': issue.source,
-          'Source Row': issue.rowNumber,
-          'BOM Level': issue.level,
-          'Parent Assembly': issue.parentAssembly,
-          'Parent Hierarchy Path': issue.hierarchyPath,
-          'Item Code (No.)': issue.itemCode,
-          Description: issue.description || '—',
-          Explanation: issue.message,
-        }))
-      : [{ Status: 'No structural warnings found.' }];
-  XLSX.utils.book_append_sheet(
-    wb,
-    XLSX.utils.json_to_sheet(warningRows),
-    'Structural Warnings'
+    XLSX.utils.json_to_sheet(observationRows),
+    'Observations & Other'
   );
 
   const bookType: XLSX.BookType = format === 'xls' ? 'biff8' : 'xlsx';
@@ -331,7 +249,7 @@ export function exportBomVerificationExcel(
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `BOM_Error_Report.${ext}`;
+  anchor.download = `BOM_Discrepancy_Report.${ext}`;
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);

@@ -154,12 +154,12 @@ export default function App() {
     const report = verifyBoms(navSheet.rows, navMapping, bcSheet.rows, bcMapping);
     setVerificationReport(report);
 
-    if (report.incorrectRecords.length > 0) {
+    if (report.audit.validationStatus !== 'APPROVED') {
+      setActiveTab('audit');
+    } else if (report.summary.incorrectOccurrenceCount > 0) {
       setActiveTab('incorrect');
-    } else if (report.descriptionReviewRecords.length > 0) {
-      setActiveTab('description_review');
-    } else if (report.missingItemCodeRecords.length > 0) {
-      setActiveTab('missing_item_code');
+    } else if (report.summary.unresolvedCount > 0) {
+      setActiveTab('unresolved');
     } else if (report.missingRecords.length > 0) {
       setActiveTab('missing');
     } else if (report.additionalRecords.length > 0) {
@@ -186,8 +186,10 @@ export default function App() {
     await Promise.all([handleLoadNavFile(navFile), handleLoadBcFile(bcFile)]);
   };
 
+  const isReportApproved = verificationReport?.audit.validationStatus === 'APPROVED';
+
   const handleDownloadPdf = () => {
-    if (!verificationReport || !navWorkbook || !bcWorkbook) return;
+    if (!verificationReport || !navWorkbook || !bcWorkbook || !isReportApproved) return;
     exportBomVerificationPdf(
       verificationReport,
       navWorkbook.fileName,
@@ -196,7 +198,7 @@ export default function App() {
   };
 
   const handleDownloadExcel = () => {
-    if (!verificationReport || !navWorkbook || !bcWorkbook) return;
+    if (!verificationReport || !navWorkbook || !bcWorkbook || !isReportApproved) return;
     exportBomVerificationExcel(
       verificationReport,
       navWorkbook.fileName,
@@ -358,10 +360,15 @@ export default function App() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {verificationReport && !isReportApproved && (
+              <span className="text-xs font-medium text-rose-700">
+                Reports locked: VALIDATION INCOMPLETE
+              </span>
+            )}
             <button
               type="button"
               onClick={handleDownloadPdf}
-              disabled={!verificationReport}
+              disabled={!isReportApproved}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-200 rounded-md hover:bg-slate-50 disabled:opacity-45 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5 text-red-700" />
@@ -370,10 +377,10 @@ export default function App() {
 
             <div className="inline-flex items-center gap-1.5">
               <select
-                aria-label="Excel Error Report format"
+                aria-label="Excel Discrepancy Report format"
                 value={excelExportFormat}
                 onChange={(e) => setExcelExportFormat(e.target.value as ExcelContainerFormat)}
-                disabled={!verificationReport}
+                disabled={!isReportApproved}
                 className="h-8.5 px-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-md disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-blue-600"
               >
                 <option value="xlsx">.xlsx</option>
@@ -382,11 +389,11 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleDownloadExcel}
-                disabled={!verificationReport}
+                disabled={!isReportApproved}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-200 rounded-md hover:bg-slate-50 disabled:opacity-45 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5 text-emerald-700" />
-                Download Excel Error Report
+                Download Excel Discrepancy Report
               </button>
             </div>
           </div>

@@ -1,9 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertOctagon,
   AlertTriangle,
   CheckCircle2,
-  FileWarning,
-  HelpCircle,
+  ClipboardCheck,
+  Eye,
   MinusCircle,
   Pencil,
   PlusCircle,
@@ -12,15 +13,16 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import type { BomVerificationRecord, BomVerificationReport, DiffStatus } from '../types/bom';
+import { buildVerificationObservations } from '../utils/bomObservations';
 
 export type ActiveResultTab =
   | 'incorrect'
-  | 'description_review'
-  | 'missing_item_code'
   | 'missing'
   | 'additional'
+  | 'unresolved'
   | 'matched'
   | 'warnings'
+  | 'audit'
   | 'all';
 
 interface ComparisonResultsProps {
@@ -29,48 +31,48 @@ interface ComparisonResultsProps {
   onTabChange: (tab: ActiveResultTab) => void;
 }
 
+function formatNumericDiff(diff: number | null): string | null {
+  if (diff === null || !Number.isFinite(diff) || diff === 0) return null;
+  return diff > 0 ? `+${diff}` : String(diff);
+}
+
 function renderStatusLabel(status: DiffStatus): React.ReactNode {
   switch (status) {
     case 'matched':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 whitespace-nowrap">
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 whitespace-nowrap">
           <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-          Matched
+          CORRECT
         </span>
       );
     case 'incorrect':
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 whitespace-nowrap">
-          <Pencil className="w-3.5 h-3.5 shrink-0" />
-          Field Error
-        </span>
-      );
     case 'description_review':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-sky-700 whitespace-nowrap">
-          <FileWarning className="w-3.5 h-3.5 shrink-0" />
-          Description Review
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800 whitespace-nowrap">
+          <Pencil className="w-3.5 h-3.5 shrink-0" />
+          INCORRECT
         </span>
       );
+    case 'manual_review':
     case 'missing_item_code':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-700 whitespace-nowrap">
-          <HelpCircle className="w-3.5 h-3.5 shrink-0" />
-          Missing Item Code
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-violet-700 whitespace-nowrap">
+          <Eye className="w-3.5 h-3.5 shrink-0" />
+          UNRESOLVED
         </span>
       );
     case 'missing':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 whitespace-nowrap">
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-700 whitespace-nowrap">
           <MinusCircle className="w-3.5 h-3.5 shrink-0" />
-          Missing
+          MISSING
         </span>
       );
     case 'additional':
       return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-indigo-700 whitespace-nowrap">
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-700 whitespace-nowrap">
           <PlusCircle className="w-3.5 h-3.5 shrink-0" />
-          Additional
+          ADDITIONAL
         </span>
       );
   }
@@ -82,28 +84,45 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
   onTabChange,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const { summary } = report;
+  const { summary, audit } = report;
+
+  const combinedIncorrectRecords = useMemo(
+    () => [...report.incorrectRecords, ...report.descriptionReviewRecords],
+    [report.incorrectRecords, report.descriptionReviewRecords]
+  );
+
+  const combinedUnresolvedRecords = useMemo(
+    () => [...report.missingItemCodeRecords, ...report.manualReviewRecords],
+    [report.missingItemCodeRecords, report.manualReviewRecords]
+  );
 
   const activeRecordList: BomVerificationRecord[] = useMemo(() => {
     switch (activeTab) {
       case 'incorrect':
-        return report.incorrectRecords;
-      case 'description_review':
-        return report.descriptionReviewRecords;
-      case 'missing_item_code':
-        return report.missingItemCodeRecords;
+        return combinedIncorrectRecords;
       case 'missing':
         return report.missingRecords;
       case 'additional':
         return report.additionalRecords;
+      case 'unresolved':
+        return combinedUnresolvedRecords;
       case 'matched':
         return report.matchedRecords;
       case 'all':
         return report.allRecords;
       case 'warnings':
+      case 'audit':
         return [];
     }
-  }, [activeTab, report]);
+  }, [
+    activeTab,
+    combinedIncorrectRecords,
+    combinedUnresolvedRecords,
+    report.additionalRecords,
+    report.allRecords,
+    report.matchedRecords,
+    report.missingRecords,
+  ]);
 
   const filteredRecords = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -113,9 +132,10 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
         rec.itemCode.toLowerCase().includes(q) ||
         rec.originalDescription.toLowerCase().includes(q) ||
         rec.bcDescription.toLowerCase().includes(q) ||
-        rec.parentPath.toLowerCase().includes(q) ||
-        rec.errorCategory.toLowerCase().includes(q) ||
-        rec.detailedExplanation.toLowerCase().includes(q)
+        rec.originalParentAssembly.toLowerCase().includes(q) ||
+        rec.bcParentAssembly.toLowerCase().includes(q) ||
+        rec.discrepancyCategory.toLowerCase().includes(q) ||
+        rec.reasonForClassification.toLowerCase().includes(q)
     );
   }, [activeRecordList, searchQuery]);
 
@@ -132,101 +152,125 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
     );
   }, [report.issues, searchQuery]);
 
-  const isPass = summary.overallStatus === 'PASS';
-  const origReconciled =
-    summary.matchedCount +
-    summary.matchedWithFieldErrorsTotal +
-    summary.missingCount +
-    summary.missingItemCodeOriginalCount;
-  const bcReconciled =
-    summary.matchedCount +
-    summary.matchedWithFieldErrorsTotal +
-    summary.additionalCount +
-    summary.missingItemCodeBcCount;
+  const isApproved = audit.validationStatus === 'APPROVED';
+  const isCleanPass =
+    isApproved && summary.verificationResult === 'VERIFIED – No discrepancies.';
+  const isUnresolvedBanner =
+    isApproved &&
+    summary.verificationResult === 'UNRESOLVED – Some records require manual investigation.';
 
   return (
     <section className="space-y-5">
-      {/* Overall PASS / FAIL Banner */}
+      {/* Verification Result Banner */}
       <div
         role="status"
         className={`rounded-lg border px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-          isPass
-            ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
-            : 'bg-red-50 border-red-200 text-red-950'
+          !isApproved
+            ? 'bg-rose-50 border-rose-300 text-rose-950'
+            : isCleanPass
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
+              : isUnresolvedBanner
+                ? 'bg-violet-50 border-violet-200 text-violet-950'
+                : 'bg-red-50 border-red-200 text-red-950'
         }`}
       >
-        <div className="flex items-center gap-3">
-          {isPass ? (
+        <div className="flex items-start sm:items-center gap-3">
+          {!isApproved ? (
+            <AlertOctagon className="w-6 h-6 text-rose-700 shrink-0 mt-0.5 sm:mt-0" />
+          ) : isCleanPass ? (
             <ShieldCheck className="w-6 h-6 text-emerald-700 shrink-0" />
           ) : (
-            <ShieldAlert className="w-6 h-6 text-red-700 shrink-0" />
+            <ShieldAlert
+              className={`w-6 h-6 shrink-0 ${
+                isUnresolvedBanner ? 'text-violet-700' : 'text-red-700'
+              }`}
+            />
           )}
           <div>
             <p className="font-display text-base font-bold tracking-tight">
-              {isPass
-                ? 'PASS – No discrepancies found.'
-                : 'FAIL – Discrepancies found.'}
+              {summary.verificationResult}
             </p>
-            <p className="text-xs opacity-85 mt-0.5 font-mono tabular-nums">
-              Verified {summary.verifiedAt} · Orig reconciled: {origReconciled}/{summary.originalCount} · BC reconciled: {bcReconciled}/{summary.bcCount}
+            <p className="text-xs opacity-90 mt-0.5 font-mono tabular-nums">
+              {!isApproved
+                ? `3-Stage Audit failed: ${audit.failureReasons.join(' | ')}`
+                : `Verified ${summary.verifiedAt} · Accuracy: ${summary.verificationFormulaText} · Std ${audit.originalOccurrencesAccounted}/${summary.originalCount} · Upl ${audit.bcOccurrencesAccounted}/${summary.bcCount}`}
             </p>
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={() => onTabChange('audit')}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-white/90 border border-slate-300 text-slate-800 rounded-md hover:bg-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+        >
+          <ClipboardCheck className="w-3.5 h-3.5 text-slate-700" />
+          3-Stage Verification ({audit.checks.filter((c) => c.passed).length}/{audit.checks.length})
+        </button>
       </div>
 
-      {/* Primary Occurrence Reconciliation Strip */}
-      <div className="bg-white border border-slate-200 rounded-lg grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
-        <div className="px-4 py-3.5">
-          <p className="text-xs text-slate-500">Original Count</p>
+      {/* Primary Summary Strip (Reconciles 1:1 with PDF Page 1 Summary) */}
+      <div className="bg-white border border-slate-200 rounded-lg grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
+        <div className="px-3.5 py-3.5">
+          <p className="text-xs text-slate-500">Standard BOM</p>
           <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-slate-900">
             {summary.originalCount}
           </p>
         </div>
-        <div className="px-4 py-3.5">
-          <p className="text-xs text-slate-500">BC Count</p>
+        <div className="px-3.5 py-3.5">
+          <p className="text-xs text-slate-500">Uploaded BOM</p>
           <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-slate-900">
             {summary.bcCount}
           </p>
         </div>
-        <div className="px-4 py-3.5">
+        <div className="px-3.5 py-3.5">
           <p className="text-xs text-slate-500">Correctly Matched</p>
           <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-emerald-700">
             {summary.matchedCount}
           </p>
         </div>
-        <div className="px-4 py-3.5">
-          <p className="text-xs text-slate-500">Field Errors</p>
+        <div className="px-3.5 py-3.5">
+          <p className="text-xs text-slate-500">Incorrect</p>
           <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-amber-700">
-            {summary.recordsWithErrorsCount}
+            {summary.incorrectOccurrenceCount}
           </p>
         </div>
-        <div className="px-4 py-3.5">
-          <p className="text-xs text-slate-500">Description Review</p>
-          <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-sky-700">
-            {summary.descriptionReviewCount}
-          </p>
-        </div>
-        <div className="px-4 py-3.5">
+        <div className="px-3.5 py-3.5">
           <p className="text-xs text-slate-500">Missing</p>
           <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-red-700">
             {summary.missingCount}
           </p>
         </div>
-        <div className="px-4 py-3.5">
+        <div className="px-3.5 py-3.5">
           <p className="text-xs text-slate-500">Additional</p>
           <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-indigo-700">
             {summary.additionalCount}
           </p>
         </div>
-        <div className="px-4 py-3.5">
-          <p className="text-xs text-slate-500">Structural Warnings</p>
-          <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-amber-800">
-            {summary.supplementaryWarningCount}
+        <div className="px-3.5 py-3.5">
+          <p className="text-xs text-slate-500">Unresolved</p>
+          <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-violet-700">
+            {summary.unresolvedCount}
+          </p>
+        </div>
+        <div className="px-3.5 py-3.5">
+          <p className="text-xs text-slate-500">Total Field Errors</p>
+          <p className="mt-1 text-lg font-semibold font-mono tabular-nums text-slate-900">
+            {summary.totalFieldErrorsCount}
+          </p>
+        </div>
+        <div className="px-3.5 py-3.5">
+          <p className="text-xs text-slate-500">Verification %</p>
+          <p
+            className={`mt-1 text-lg font-semibold font-mono tabular-nums ${
+              summary.verificationPercentage === 100 ? 'text-emerald-700' : 'text-slate-900'
+            }`}
+          >
+            {summary.verificationPercentage.toFixed(1)}%
           </p>
         </div>
       </div>
 
-      {/* 7-Column Discrepancy Breakdown */}
+      {/* 7-Field Breakdown */}
       <div className="bg-white border border-slate-200 rounded-lg grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
         <div className="px-3.5 py-3">
           <p className="text-[11px] text-slate-500">Incorrect Level</p>
@@ -235,20 +279,20 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
           </p>
         </div>
         <div className="px-3.5 py-3">
-          <p className="text-[11px] text-slate-500">Incorrect Parent / Item</p>
+          <p className="text-[11px] text-slate-500">Parent / Hierarchy</p>
           <p className="mt-0.5 text-base font-semibold font-mono tabular-nums text-slate-900">
             {summary.incorrectHierarchyCount}
           </p>
         </div>
         <div className="px-3.5 py-3">
-          <p className="text-[11px] text-slate-500">Missing Item Code</p>
-          <p className="mt-0.5 text-base font-semibold font-mono tabular-nums text-rose-700">
+          <p className="text-[11px] text-slate-500">Blank Part No.</p>
+          <p className="mt-0.5 text-base font-semibold font-mono tabular-nums text-violet-700">
             {summary.missingItemCodeCount}
           </p>
         </div>
         <div className="px-3.5 py-3">
-          <p className="text-[11px] text-slate-500">Description Diffs</p>
-          <p className="mt-0.5 text-base font-semibold font-mono tabular-nums text-sky-700">
+          <p className="text-[11px] text-slate-500">Description Errors</p>
+          <p className="mt-0.5 text-base font-semibold font-mono tabular-nums text-amber-700">
             {summary.incorrectDescriptionCount}
           </p>
         </div>
@@ -283,6 +327,61 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
         </div>
       </div>
 
+      {/* Separate Verification Observations (Incorrect, Missing, Additional, Unresolved & Other) */}
+      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="px-4 py-2.5 border-b border-slate-200 bg-slate-50/70 flex items-center justify-between gap-3">
+          <h2 className="text-xs font-semibold text-slate-800 uppercase tracking-wide">
+            Verification Observations (By Category)
+          </h2>
+          <span className="text-[11px] text-slate-500">
+            Click a category to inspect details
+          </span>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {buildVerificationObservations(report).map((obs) => {
+            const targetTab: ActiveResultTab =
+              obs.category === 'Incorrect'
+                ? 'incorrect'
+                : obs.category === 'Missing'
+                  ? 'missing'
+                  : obs.category === 'Additional'
+                    ? 'additional'
+                    : obs.category === 'Unresolved'
+                      ? 'unresolved'
+                      : report.issues.length > 0
+                        ? 'warnings'
+                        : 'audit';
+
+            const catColor =
+              obs.category === 'Incorrect'
+                ? 'text-amber-800'
+                : obs.category === 'Missing'
+                  ? 'text-red-700'
+                  : obs.category === 'Additional'
+                    ? 'text-indigo-700'
+                    : obs.category === 'Unresolved'
+                      ? 'text-violet-700'
+                      : 'text-slate-700';
+
+            return (
+              <button
+                key={obs.category}
+                type="button"
+                onClick={() => onTabChange(targetTab)}
+                className="w-full text-left px-4 py-2.5 hover:bg-slate-50 transition-colors flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-4 cursor-pointer"
+              >
+                <span className={`text-xs font-semibold whitespace-nowrap w-44 shrink-0 ${catColor}`}>
+                  {obs.title}
+                </span>
+                <span className="text-xs text-slate-700 leading-relaxed flex-1">
+                  {obs.observation}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Detailed Verification Tables */}
       <div className="bg-white border border-slate-200 rounded-lg">
         <div className="px-5 py-3.5 border-b border-slate-200 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
@@ -296,29 +395,7 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Field Errors ({report.incorrectRecords.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => onTabChange('description_review')}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeTab === 'description_review'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Description Review ({report.descriptionReviewRecords.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => onTabChange('missing_item_code')}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeTab === 'missing_item_code'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Missing Item Code ({report.missingItemCodeRecords.length})
+              Incorrect Items ({summary.incorrectOccurrenceCount})
             </button>
             <button
               type="button"
@@ -329,7 +406,7 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Missing ({report.missingRecords.length})
+              Missing Items ({summary.missingCount})
             </button>
             <button
               type="button"
@@ -340,7 +417,18 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Additional ({report.additionalRecords.length})
+              Additional Items ({summary.additionalCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => onTabChange('unresolved')}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === 'unresolved'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Unresolved Items ({summary.unresolvedCount})
             </button>
             <button
               type="button"
@@ -351,7 +439,7 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Matched ({report.matchedRecords.length})
+              Correctly Matched ({summary.matchedCount})
             </button>
             <button
               type="button"
@@ -362,7 +450,18 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Structural Warnings ({report.issues.length})
+              Warnings ({report.issues.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => onTabChange('audit')}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === 'audit'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              3-Stage Verification
             </button>
             <button
               type="button"
@@ -377,32 +476,128 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
             </button>
           </div>
 
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search No., parent, description…"
-              className="h-8 pl-8 pr-3 w-64 text-xs text-slate-900 placeholder:text-slate-400 bg-white border border-slate-200 rounded-md focus-visible:outline-2 focus-visible:outline-blue-600"
-            />
-          </div>
+          {activeTab !== 'audit' && (
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search Part No., parent, description…"
+                className="h-8 pl-8 pr-3 w-64 text-xs text-slate-900 placeholder:text-slate-400 bg-white border border-slate-200 rounded-md focus-visible:outline-2 focus-visible:outline-blue-600"
+              />
+            </div>
+          )}
         </div>
 
-        {activeTab !== 'warnings' ? (
+        {activeTab === 'audit' ? (
+          <div className="p-5 space-y-5">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="border border-slate-200 rounded-md p-4 bg-slate-50/60">
+                <p className="text-xs font-semibold text-slate-700">
+                  Standard BOM Occurrence Reconciliation
+                </p>
+                <p className="mt-1 text-lg font-mono font-bold tabular-nums text-slate-900">
+                  {audit.originalOccurrencesAccounted} / {summary.originalCount}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-600 font-mono tabular-nums">
+                  {summary.matchedCount} matched + {summary.incorrectOccurrenceCount} incorrect +{' '}
+                  {summary.missingCount} missing + {summary.unresolvedOriginalCount} unresolved
+                </p>
+              </div>
+              <div className="border border-slate-200 rounded-md p-4 bg-slate-50/60">
+                <p className="text-xs font-semibold text-slate-700">
+                  Uploaded BOM Occurrence Reconciliation
+                </p>
+                <p className="mt-1 text-lg font-mono font-bold tabular-nums text-slate-900">
+                  {audit.bcOccurrencesAccounted} / {summary.bcCount}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-600 font-mono tabular-nums">
+                  {summary.matchedCount} matched + {summary.incorrectOccurrenceCount} incorrect +{' '}
+                  {summary.additionalCount} additional + {summary.unresolvedBcCount} unresolved
+                </p>
+              </div>
+              <div className="border border-slate-200 rounded-md p-4 bg-slate-50/60">
+                <p className="text-xs font-semibold text-slate-700">Accuracy &amp; Report Gate</p>
+                <p
+                  className={`mt-1 text-lg font-mono font-bold ${
+                    isApproved ? 'text-emerald-700' : 'text-rose-700'
+                  }`}
+                >
+                  {summary.verificationPercentage.toFixed(1)}% · {audit.validationStatus}
+                </p>
+                <p className="mt-1 text-[11px] text-slate-600 font-mono">
+                  {summary.verificationFormulaText} · Pass 2 adj: {audit.stage2AdjustmentsCount}
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-md">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
+                    <th className="py-2.5 px-4 whitespace-nowrap">Verification Pass</th>
+                    <th className="py-2.5 px-4 whitespace-nowrap">Audit Check</th>
+                    <th className="py-2.5 px-3 whitespace-nowrap">Status</th>
+                    <th className="py-2.5 px-4 whitespace-nowrap">Details</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-xs">
+                  {audit.checks.map((check, idx) => (
+                    <tr key={`${check.stage}-${idx}`} className="hover:bg-slate-50/70">
+                      <td className="py-2.5 px-4 font-medium text-slate-800 whitespace-nowrap">
+                        {check.stage}
+                      </td>
+                      <td className="py-2.5 px-4 font-medium text-slate-900">
+                        {check.checkName}
+                      </td>
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        {check.passed ? (
+                          <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            PASSED
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-rose-700 font-semibold">
+                            <AlertOctagon className="w-3.5 h-3.5" />
+                            FAILED
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-4 text-slate-700">{check.details}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {audit.stage2AdjustmentNotes.length > 0 && (
+              <div className="border border-amber-200 bg-amber-50/50 rounded-md p-4 space-y-1.5">
+                <p className="text-xs font-semibold text-amber-900">
+                  Pass 2 Independent Structure &amp; Occurrence Adjustments
+                </p>
+                <ul className="list-disc pl-5 text-xs text-amber-900 space-y-1">
+                  {audit.stage2AdjustmentNotes.map((note, idx) => (
+                    <li key={idx}>{note}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : activeTab !== 'warnings' ? (
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/50 text-[11px] font-semibold text-slate-600">
-                  <th className="py-2.5 px-4 whitespace-nowrap">Classification / Category</th>
-                  <th className="py-2.5 px-3 whitespace-nowrap">Level</th>
-                  <th className="py-2.5 px-4 whitespace-nowrap">Parent Assembly &amp; No.</th>
-                  <th className="py-2.5 px-4 whitespace-nowrap">Description (Orig / BC)</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Status / Category</th>
+                  <th className="py-2.5 px-3 whitespace-nowrap">Level (Std / Upl)</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Parent Assembly &amp; Part No.</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Description (Std / Upl)</th>
                   <th className="py-2.5 px-3 whitespace-nowrap">Item Type</th>
                   <th className="py-2.5 px-3 whitespace-nowrap">UOM</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">BOM Qty. (Orig / BC)</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Total Qty (Orig / BC)</th>
-                  <th className="py-2.5 px-4 whitespace-nowrap">Rows &amp; Explanation</th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">BOM Qty. (Std / Upl)</th>
+                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Total Qty (Std / Upl)</th>
+                  <th className="py-2.5 px-4 whitespace-nowrap">Rows &amp; Issue Details</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 text-xs">
@@ -419,13 +614,11 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                         ? 'bg-red-50/35 hover:bg-red-50/60'
                         : rec.status === 'additional'
                           ? 'bg-indigo-50/35 hover:bg-indigo-50/60'
-                          : rec.status === 'description_review'
-                            ? 'bg-sky-50/35 hover:bg-sky-50/60'
-                            : rec.status === 'missing_item_code'
-                              ? 'bg-rose-50/35 hover:bg-rose-50/60'
-                              : rec.status === 'incorrect'
-                                ? 'bg-amber-50/35 hover:bg-amber-50/60'
-                                : 'hover:bg-slate-50/80';
+                          : rec.status === 'manual_review' || rec.status === 'missing_item_code'
+                            ? 'bg-violet-50/35 hover:bg-violet-50/60'
+                            : rec.status === 'incorrect' || rec.status === 'description_review'
+                              ? 'bg-amber-50/35 hover:bg-amber-50/60'
+                              : 'hover:bg-slate-50/80';
 
                     const hasBomQtyDiff = rec.changes.some((c) => c.field === 'BOM Qty.');
                     const hasTotalQtyDiff = rec.changes.some((c) => c.field === 'Total BOM Qty');
@@ -433,17 +626,21 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                     const hasDescDiff =
                       rec.status === 'description_review' ||
                       rec.changes.some((c) => c.field === 'Description');
+                    const bomDiffStr = formatNumericDiff(rec.bomQtyDiff);
+                    const totalDiffStr = formatNumericDiff(rec.totalQtyDiff);
 
                     return (
                       <tr key={rec.key} className={`${rowTint} transition-colors`}>
                         <td className="py-2.5 px-4 align-top">
                           <div>{renderStatusLabel(rec.status)}</div>
                           <p className="mt-0.5 text-[11px] text-slate-600">
-                            {rec.errorCategory}
+                            {rec.discrepancyCategory}
                           </p>
                         </td>
                         <td className="py-2.5 px-3 align-top font-mono tabular-nums text-slate-700 whitespace-nowrap">
-                          {rec.rawLevel || rec.level}
+                          {rec.originalLevel === rec.bcLevel
+                            ? rec.originalLevel
+                            : `${rec.originalLevel} / ${rec.bcLevel}`}
                         </td>
                         <td className="py-2.5 px-4 align-top">
                           <div
@@ -462,23 +659,44 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                               {rec.itemCode}
                             </span>
                           </div>
-                          <p
-                            className="mt-0.5 text-[11px] text-slate-500 truncate max-w-xs"
-                            style={{ paddingLeft: `${Math.min(rec.level, 6) * 12}px` }}
-                            title={rec.parentPath}
-                          >
-                            Parent: {rec.parentAssemblyCode} ({rec.componentRole})
-                          </p>
+                          {rec.originalParentAssembly !== rec.bcParentAssembly &&
+                          rec.originalParentAssembly !== '—' &&
+                          rec.bcParentAssembly !== '—' ? (
+                            <div
+                              className="mt-0.5 text-[11px] text-slate-600 space-y-0.5"
+                              style={{ paddingLeft: `${Math.min(rec.level, 6) * 12}px` }}
+                            >
+                              <p className="truncate max-w-xs" title={rec.originalParentAssembly}>
+                                Std Parent: {rec.originalParentAssembly}
+                              </p>
+                              <p
+                                className="truncate max-w-xs text-amber-800 font-medium"
+                                title={rec.bcParentAssembly}
+                              >
+                                Upl Parent: {rec.bcParentAssembly}
+                              </p>
+                            </div>
+                          ) : (
+                            <p
+                              className="mt-0.5 text-[11px] text-slate-500 truncate max-w-xs"
+                              style={{ paddingLeft: `${Math.min(rec.level, 6) * 12}px` }}
+                              title={rec.parentPath}
+                            >
+                              Parent: {rec.parentAssemblyCode} ({rec.componentRole})
+                            </p>
+                          )}
                         </td>
                         <td className="py-2.5 px-4 align-top text-slate-700 max-w-sm">
                           {hasDescDiff ? (
                             <div className="space-y-1 text-[11px]">
                               <div>
-                                <span className="font-semibold text-slate-600">Orig:</span>{' '}
-                                <span className="text-slate-900">{rec.originalDescription || '—'}</span>
+                                <span className="font-semibold text-slate-600">Std:</span>{' '}
+                                <span className="text-slate-900">
+                                  {rec.originalDescription || '—'}
+                                </span>
                               </div>
                               <div>
-                                <span className="font-semibold text-sky-700">BC:</span>{' '}
+                                <span className="font-semibold text-amber-800">Upl:</span>{' '}
                                 <span className="text-slate-900">{rec.bcDescription || '—'}</span>
                               </div>
                             </div>
@@ -511,7 +729,14 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                               : 'text-slate-800'
                           }`}
                         >
-                          {rec.originalBomQty ?? '—'} / {rec.bcBomQty ?? '—'}
+                          <div>
+                            {rec.originalBomQty ?? '—'} / {rec.bcBomQty ?? '—'}
+                          </div>
+                          {bomDiffStr && (
+                            <div className="text-[10px] font-semibold text-amber-900">
+                              Diff: {bomDiffStr}
+                            </div>
+                          )}
                         </td>
                         <td
                           className={`py-2.5 px-3 align-top text-right font-mono tabular-nums whitespace-nowrap ${
@@ -520,12 +745,19 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                               : 'text-slate-900 font-medium'
                           }`}
                         >
-                          {rec.originalTotalQty ?? '—'} / {rec.bcTotalQty ?? '—'}
+                          <div>
+                            {rec.originalTotalQty ?? '—'} / {rec.bcTotalQty ?? '—'}
+                          </div>
+                          {totalDiffStr && (
+                            <div className="text-[10px] font-semibold text-amber-900">
+                              Diff: {totalDiffStr}
+                            </div>
+                          )}
                         </td>
-                        <td className="py-2.5 px-4 align-top text-slate-700 min-w-[260px]">
-                          <p className="text-[11px] font-mono text-slate-500 mb-0.5">
-                            Orig Row: {rec.originalNode?.rowNumber ?? '—'} · BC Row:{' '}
-                            {rec.bcNode?.rowNumber ?? '—'}
+                        <td className="py-2.5 px-4 align-top text-slate-700 min-w-[270px]">
+                          <p className="text-[11px] font-mono text-slate-500 mb-0.5 tabular-nums">
+                            Std Row: {rec.originalRowNumber ?? '—'} · Upl Row:{' '}
+                            {rec.bcRowNumber ?? '—'}
                           </p>
                           {rec.changes.length > 0 ? (
                             <div className="space-y-1">
@@ -540,7 +772,7 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                             </div>
                           ) : (
                             <span className="text-[11px] text-slate-600">
-                              {rec.detailedExplanation}
+                              {rec.reasonForClassification}
                             </span>
                           )}
                         </td>
@@ -568,11 +800,11 @@ export const ComparisonResults: React.FC<ComparisonResultsProps> = ({
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/50 text-[11px] font-semibold text-slate-600">
                     <th className="py-2.5 px-4 whitespace-nowrap">Warning Category</th>
-                    <th className="py-2.5 px-3 whitespace-nowrap">Source Report</th>
+                    <th className="py-2.5 px-3 whitespace-nowrap">Source BOM</th>
                     <th className="py-2.5 px-3 whitespace-nowrap">Row</th>
                     <th className="py-2.5 px-3 whitespace-nowrap">Level</th>
                     <th className="py-2.5 px-4 whitespace-nowrap">Parent Assembly</th>
-                    <th className="py-2.5 px-4 whitespace-nowrap">Item Code</th>
+                    <th className="py-2.5 px-4 whitespace-nowrap">Part No.</th>
                     <th className="py-2.5 px-4 whitespace-nowrap">Description</th>
                     <th className="py-2.5 px-4 whitespace-nowrap">Explanation</th>
                   </tr>

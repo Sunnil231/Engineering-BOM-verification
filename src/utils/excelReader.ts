@@ -12,13 +12,15 @@ export const FILE_INPUT_ACCEPT =
 
 const COST_COLUMN_PATTERNS: RegExp[] = [
   /cost/i,
-  /amt/i,
+  /\bamt\b/i,
   /amount/i,
   /currency/i,
-  /rate/i,
-  /price/i,
-  /value/i,
-  /std/i,
+  /\bcurr\b/i,
+  /\brate\b/i,
+  /\bprice\b/i,
+  /\bvalue\b/i,
+  /\bstd\.?\s*(cost|amt|amount|price|val|value)/i,
+  /item\s*std/i,
 ];
 
 const IGNORED_SERIAL_PATTERNS: RegExp[] = [
@@ -42,9 +44,12 @@ const NAV_HEADER_PATTERNS: Record<keyof ColumnMapping, RegExp[]> = {
     /^no\.?$/i,
     /^item[\s_-]*no\.?$/i,
     /^item[\s_-]*code$/i,
+    /^item[\s_-]*number$/i,
     /^part[\s_-]*(no\.?|num|number|#)$/i,
-    /^component[\s_-]*(no\.?|code)?$/i,
-    /item[\s_-]*no/i,
+    /^component[\s_-]*(no\.?|code|item\s*no\.?)?$/i,
+    /^material[\s_-]*(no\.?|code)?$/i,
+    /^(?!.*parent).*item[\s_-]*no/i,
+    /^item$/i,
   ],
   description: [
     /^description$/i,
@@ -67,8 +72,9 @@ const NAV_HEADER_PATTERNS: Record<keyof ColumnMapping, RegExp[]> = {
   bomQty: [
     /^bom[\s_-]*qty\.?$/i,
     /^quantity[\s_-]*per$/i,
-    /^qty\.?[\s_-]*per$/i,
+    /^qty\.?[\s_-]*per(\s*parent)?$/i,
     /^bom[\s_-]*quantity$/i,
+    /^net[\s_-]*qty\.?$/i,
     /^qty\.?$/i,
     /^quantity$/i,
   ],
@@ -79,6 +85,7 @@ const NAV_HEADER_PATTERNS: Record<keyof ColumnMapping, RegExp[]> = {
     /^total[\s_-]*quantity$/i,
     /^extended[\s_-]*qty\.?$/i,
     /^ext\.?[\s_-]*qty\.?$/i,
+    /^required[\s_-]*qty\.?$/i,
   ],
 };
 
@@ -94,8 +101,11 @@ const BC_HEADER_PATTERNS: Record<keyof ColumnMapping, RegExp[]> = {
     /^no\.?$/i,
     /^item[\s_-]*no\.?$/i,
     /^item[\s_-]*code$/i,
+    /^item[\s_-]*number$/i,
     /^component[\s_-]*no\.?$/i,
     /^part[\s_-]*(no\.?|number)$/i,
+    /^(?!.*parent).*item[\s_-]*no/i,
+    /^item$/i,
   ],
   description: [
     /^description$/i,
@@ -117,8 +127,9 @@ const BC_HEADER_PATTERNS: Record<keyof ColumnMapping, RegExp[]> = {
   bomQty: [
     /^bom[\s_-]*qty\.?$/i,
     /^quantity[\s_-]*per$/i,
-    /^qty\.?[\s_-]*per$/i,
+    /^qty\.?[\s_-]*per(\s*parent)?$/i,
     /^bom[\s_-]*quantity$/i,
+    /^net[\s_-]*qty\.?$/i,
     /^qty\.?$/i,
     /^quantity$/i,
   ],
@@ -128,6 +139,7 @@ const BC_HEADER_PATTERNS: Record<keyof ColumnMapping, RegExp[]> = {
     /^total[\s_-]*quantity$/i,
     /^total[\s_-]*bom[\s_-]*quantity$/i,
     /^extended[\s_-]*quantity$/i,
+    /^required[\s_-]*qty\.?$/i,
   ],
 };
 
@@ -256,11 +268,12 @@ function findBomHeaderRow(
   matrix: unknown[][],
   reportFormat: BomReportFormat
 ): { headerRowIndex: number; mergedHeaderRow: unknown[]; hasSecondHeaderLine: boolean } {
-  const scanLimit = Math.min(matrix.length, 40);
-  const coreKeywords =
+  const scanLimit = Math.min(matrix.length, 45);
+  const exactHeaders = new Set(
     reportFormat === 'navigation'
-      ? ['level', 'no.', 'no', 'description', 'item type', 'type', 'uom', 'unit of measure', 'bom qty', 'total bom qty', 'quantity per', 'total quantity']
-      : ['level', 'bom level', 'no.', 'item no.', 'description', 'item type', 'type', 'uom', 'unit of measure', 'bom qty', 'total bom qty', 'quantity per', 'total qty'];
+      ? ['level', 'no.', 'no', 'item no.', 'description', 'item type', 'type', 'uom', 'unit of measure', 'bom qty.', 'bom qty', 'total bom qty', 'total bom qty.', 'quantity per', 'total quantity']
+      : ['level', 'bom level', 'no.', 'item no.', 'description', 'item type', 'type', 'uom', 'unit of measure code', 'bom qty.', 'bom qty', 'total bom qty', 'total bom qty.', 'quantity per', 'total qty']
+  );
 
   let bestIndex = -1;
   let bestScore = -1;
@@ -268,33 +281,45 @@ function findBomHeaderRow(
   for (let r = 0; r < scanLimit; r += 1) {
     const row = matrix[r] ?? [];
     const nonEmptyCells = row
-      .map((c) => String(c ?? '').trim().replace(/\s+/g, ' '))
+      .map((c) => String(c ?? '').replace(/\u00a0/g, ' ').trim().replace(/\s+/g, ' '))
       .filter((t) => t.length > 0);
     if (nonEmptyCells.length < 3) continue;
 
-    let keywordHits = 0;
+    let exactHits = 0;
+    let partialHits = 0;
     let numericCells = 0;
+    let colonBannerCells = 0;
+
     for (const text of nonEmptyCells) {
       const lower = text.toLowerCase();
       if (/^\d+(\.\d+)?$/.test(lower)) {
         numericCells += 1;
         continue;
       }
-      if (coreKeywords.some((kw) => lower === kw || lower.includes(kw))) {
-        keywordHits += 1;
+      if (lower.includes(':') && lower.length > 14) {
+        colonBannerCells += 1;
+      }
+      if (exactHeaders.has(lower)) {
+        exactHits += 1;
+      } else if (Array.from(exactHeaders).some((kw) => lower.includes(kw))) {
+        partialHits += 1;
       }
     }
 
-    // Header rows should have strong keyword hits and almost no pure numeric values
-    const score = keywordHits * 15 - numericCells * 10 + Math.min(nonEmptyCells.length, 10);
-    if (keywordHits >= 2 && score > bestScore) {
+    const score =
+      exactHits * 25 +
+      partialHits * 8 -
+      numericCells * 12 -
+      colonBannerCells * 15 +
+      Math.min(nonEmptyCells.length, 10);
+
+    if ((exactHits >= 2 || exactHits + partialHits >= 3) && score > bestScore) {
       bestScore = score;
       bestIndex = r;
     }
   }
 
   if (bestIndex === -1) {
-    // Fallback to first row with at least 2 non-empty cells
     const fallbackIdx = matrix.findIndex(
       (r) => (r ?? []).filter((c) => String(c ?? '').trim() !== '').length >= 2
     );
@@ -304,19 +329,21 @@ function findBomHeaderRow(
   const primaryRow = matrix[bestIndex] ?? [];
   const nextRow = matrix[bestIndex + 1] ?? [];
 
-  // Check if next row is a wrapped second line of headers (e.g. "Total BOM" / "Qty")
   let hasSecondHeaderLine = false;
   if (bestIndex + 1 < matrix.length) {
     const nextTexts = nextRow
-      .map((c) => String(c ?? '').trim())
+      .map((c) => String(c ?? '').replace(/[\u00a0\u200b-\u200d\ufeff]/g, ' ').trim())
       .filter(Boolean);
     const nextHasNumbers = nextTexts.some((t) => /^\d+(\.\d+)?$/.test(t));
+    const headerTokenRe = /^(qty\.?|quantity|code|type|amt|amount|cost|no\.?|uom|level|per|bom|description)$/i;
+    const continuationHits = nextTexts.filter((t) => headerTokenRe.test(t)).length;
+    const allShort = nextTexts.every((t) => t.length <= 22);
     const nextLooksLikeHeaderContinuation =
       nextTexts.length > 0 &&
       !nextHasNumbers &&
-      nextTexts.some((t) =>
-        /^(qty\.?|quantity|code|type|amt|amount|cost|no\.?|uom)$/i.test(t)
-      );
+      allShort &&
+      continuationHits >= 2 &&
+      continuationHits >= Math.ceil(nextTexts.length / 2);
     if (nextLooksLikeHeaderContinuation) {
       hasSecondHeaderLine = true;
     }
@@ -325,9 +352,9 @@ function findBomHeaderRow(
   const maxLen = Math.max(primaryRow.length, hasSecondHeaderLine ? nextRow.length : 0);
   const mergedHeaderRow: unknown[] = [];
   for (let c = 0; c < maxLen; c += 1) {
-    const top = String(primaryRow[c] ?? '').trim().replace(/\s+/g, ' ');
+    const top = String(primaryRow[c] ?? '').replace(/\u00a0/g, ' ').trim().replace(/\s+/g, ' ');
     const sub = hasSecondHeaderLine
-      ? String(nextRow[c] ?? '').trim().replace(/\s+/g, ' ')
+      ? String(nextRow[c] ?? '').replace(/\u00a0/g, ' ').trim().replace(/\s+/g, ' ')
       : '';
     mergedHeaderRow.push([top, sub].filter(Boolean).join(' '));
   }
@@ -342,6 +369,11 @@ function isFooterOrTotalRow(rowValues: string[], descText: string): boolean {
     lowerDesc.startsWith('grand total') ||
     lowerDesc.startsWith('sub total') ||
     lowerDesc.startsWith('subtotal') ||
+    lowerDesc.startsWith('note:') ||
+    lowerDesc.startsWith('notes:') ||
+    lowerDesc.startsWith('filter:') ||
+    lowerDesc.startsWith('filters:') ||
+    lowerDesc.startsWith('printed ') ||
     /^page\s+\d+/i.test(lowerDesc) ||
     /^[-_=]{3,}$/.test(lowerDesc)
   ) {
@@ -433,9 +465,11 @@ function parseWorksheetForReport(
   const rows: Record<string, unknown>[] = [];
   let blankRowsSkipped = 0;
   let continuationRowsMerged = 0;
+  let previousWasBlankOrSkipped = false;
 
   const cleanCellText = (val: unknown): string =>
     String(val ?? '')
+      .replace(/[\u200b-\u200d\ufeff]/g, '')
       .replace(/\u00a0/g, ' ')
       .trim();
 
@@ -447,64 +481,110 @@ function parseWorksheetForReport(
     const hasAnyValue = cellStrings.some((s) => s !== '');
     if (!hasAnyValue) {
       blankRowsSkipped += 1;
+      previousWasBlankOrSkipped = true;
       continue;
     }
 
     const levelVal = levelIdx >= 0 ? cleanCellText(rowArr[levelIdx]) : '';
-    const itemVal = itemIdx >= 0 ? cleanCellText(rowArr[itemIdx]) : '';
+    let itemVal = itemIdx >= 0 ? cleanCellText(rowArr[itemIdx]) : '';
+    // Preserve zero-padded numeric formatting on Item Code if cell had leading-zero format (e.g. "00000000000")
+    if (itemIdx >= 0 && typeof rowArr[itemIdx] === 'number') {
+      const addr = XLSX.utils.encode_cell({ r, c: itemIdx });
+      const cell = worksheet[addr] as XLSX.CellObject | undefined;
+      if (
+        cell?.w &&
+        cell.z &&
+        /^0+$/.test(String(cell.z).trim()) &&
+        /^0+\d+$/.test(cell.w.trim())
+      ) {
+        itemVal = cell.w.trim();
+      }
+    }
     const descVal = descIdx >= 0 ? cleanCellText(rowArr[descIdx]) : '';
     const typeVal = typeIdx >= 0 ? cleanCellText(rowArr[typeIdx]) : '';
     const uomVal = uomIdx >= 0 ? cleanCellText(rowArr[uomIdx]) : '';
     const bomQtyVal = bomQtyIdx >= 0 ? cleanCellText(rowArr[bomQtyIdx]) : '';
     const totalQtyVal = totalQtyIdx >= 0 ? cleanCellText(rowArr[totalQtyIdx]) : '';
 
-    // Exclude parser-generated blank root-level / formatting-only / cost-only / serial-only rows:
-    // If Item Code, Description, BOM Qty., Total BOM Qty, Item Type, and UOM are all blank,
-    // a stray Level or Sr. No. or hidden cost cell alone is not a real BOM component.
+    // 1B. Skip repeated header rows inserted by multi-page ERP Excel exports
+    const isRepeatedHeaderRow =
+      detectedMapping.itemCode !== '' &&
+      itemVal.toLowerCase() === detectedMapping.itemCode.toLowerCase() &&
+      ((detectedMapping.level !== '' &&
+        levelVal.toLowerCase() === detectedMapping.level.toLowerCase()) ||
+        (detectedMapping.description !== '' &&
+          descVal.toLowerCase() === detectedMapping.description.toLowerCase()));
+    if (isRepeatedHeaderRow) {
+      blankRowsSkipped += 1;
+      previousWasBlankOrSkipped = true;
+      continue;
+    }
+
+    // Exclude parser-generated blank root-level / formatting-only / cost-only / serial-only rows
     const hasSubstance = [itemVal, descVal, typeVal, uomVal, bomQtyVal, totalQtyVal].some(
       (v) => v !== ''
     );
     if (!hasSubstance) {
       blankRowsSkipped += 1;
+      previousWasBlankOrSkipped = true;
       continue;
     }
 
     const coreNonDescValues = [levelVal, itemVal, typeVal, uomVal, bomQtyVal, totalQtyVal];
     const hasCoreNonDesc = coreNonDescValues.some((v) => v !== '');
 
-    // 2. Skip report footer / total / filter / page marker rows
+    // 2. Skip report footer / total / note / filter / page marker rows
     if (!itemVal && !bomQtyVal && !totalQtyVal && isFooterOrTotalRow(cellStrings, descVal)) {
       blankRowsSkipped += 1;
+      previousWasBlankOrSkipped = true;
       continue;
     }
 
     // 3. Description continuation row:
-    // Only Description has text while Level, No., Item Type, UOM, BOM Qty., Total BOM Qty are empty
-    if (!hasCoreNonDesc && descVal && rows.length > 0 && detectedMapping.description) {
+    // Must immediately follow a valid component row (no blank row separating them),
+    // and only Description has text while Level, No., Item Type, UOM, BOM Qty., Total BOM Qty are empty.
+    if (
+      !hasCoreNonDesc &&
+      descVal &&
+      rows.length > 0 &&
+      !previousWasBlankOrSkipped &&
+      detectedMapping.description
+    ) {
       const prevRow = rows[rows.length - 1];
       const prevDesc = cleanCellText(prevRow[detectedMapping.description]);
       prevRow[detectedMapping.description] = [prevDesc, descVal].filter(Boolean).join(' ');
+      const prevCont = Array.isArray(prevRow.__continuationRows)
+        ? (prevRow.__continuationRows as number[])
+        : [];
+      prevRow.__continuationRows = [...prevCont, r + 1];
       continuationRowsMerged += 1;
       continue;
     }
 
-    // 4. Skip isolated trailing/header banner noise when No., Level, Qty, Item Type, UOM are all empty and no preceding row exists
-    if (!hasCoreNonDesc && descVal && rows.length === 0) {
+    // 4. Skip isolated banner/note text when no core BOM fields exist after a blank gap or before any component
+    if (!hasCoreNonDesc && descVal && (rows.length === 0 || previousWasBlankOrSkipped)) {
       blankRowsSkipped += 1;
+      previousWasBlankOrSkipped = true;
       continue;
     }
 
+    previousWasBlankOrSkipped = false;
+
     const record: Record<string, unknown> = {
       __rowNumber: r + 1,
+      __continuationRows: [],
     };
 
     for (let c = 0; c < headers.length; c += 1) {
       const header = headers[c];
-      // Explicitly strip cost columns from parsed row data
       if (isCostOrIgnoredColumn(header)) continue;
+      if (c === itemIdx && itemVal) {
+        record[header] = itemVal;
+        continue;
+      }
       const value = rowArr[c];
       if (typeof value === 'string') {
-        record[header] = value.replace(/\u00a0/g, ' ');
+        record[header] = value.replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\u00a0/g, ' ');
       } else {
         record[header] = value === undefined || value === null ? '' : value;
       }
